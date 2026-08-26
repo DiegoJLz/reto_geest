@@ -10,6 +10,8 @@ import {
   Query,
 } from '@nestjs/common';
 import { ApiOperation, ApiParam, ApiTags } from '@nestjs/swagger';
+import { NotificationAttemptResponseDto } from '../notifications/dto/notification-attempt-response.dto';
+import { NotificationsService } from '../notifications/notifications.service';
 import { AssignUsersDto, AssignUsersResponseDto } from './dto/assign-users.dto';
 import { CompleteTaskDto, CompleteTaskResponseDto } from './dto/complete-task.dto';
 import { CreateTaskDto } from './dto/create-task.dto';
@@ -20,7 +22,10 @@ import { TasksService } from './tasks.service';
 @ApiTags('tasks')
 @Controller('tasks')
 export class TasksController {
-  constructor(private readonly tasksService: TasksService) {}
+  constructor(
+    private readonly tasksService: TasksService,
+    private readonly notificationsService: NotificationsService,
+  ) {}
 
   @Post()
   @HttpCode(HttpStatus.CREATED)
@@ -65,5 +70,16 @@ export class TasksController {
     @Body() dto: CompleteTaskDto,
   ): Promise<CompleteTaskResponseDto> {
     return this.tasksService.completeByUser(id, dto.userId);
+  }
+
+  @Get(':id/notifications')
+  @ApiOperation({
+    summary: 'List all delivery attempts for the archive notification of this task',
+  })
+  @ApiParam({ name: 'id', type: Number })
+  async notifications(
+    @Param('id', ParseIntPipe) id: number,
+  ): Promise<NotificationAttemptResponseDto[]> {
+    return this.notificationsService.getAttemptsForTask(id);
   }
 }

@@ -1,9 +1,9 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
-import { DataSource, In, IsNull, Repository } from 'typeorm';
+import { DataSource, IsNull, Repository } from 'typeorm';
 import { NotFoundException } from '../../common/exceptions/not-found.exception';
 import { ValidationException } from '../../common/exceptions/validation.exception';
-import { User } from '../users/entities/user.entity';
+import { UsersService } from '../users/users.service';
 import { AssignUsersResponseDto } from './dto/assign-users.dto';
 import { CompleteTaskResponseDto } from './dto/complete-task.dto';
 import { CreateTaskDto } from './dto/create-task.dto';
@@ -23,7 +23,7 @@ export class TasksService {
     @InjectRepository(Task) private readonly tasks: Repository<Task>,
     @InjectRepository(TaskAssignment)
     private readonly assignments: Repository<TaskAssignment>,
-    @InjectRepository(User) private readonly users: Repository<User>,
+    private readonly usersService: UsersService,
     @InjectDataSource() private readonly dataSource: DataSource,
     @Inject(TASK_ARCHIVED_NOTIFIER)
     private readonly notifier: TaskArchivedNotifier,
@@ -77,7 +77,14 @@ export class TasksService {
   /**
    * Assigns a batch of users to a task. Duplicate rows are silently skipped
    * via INSERT ... ON CONFLICT DO NOTHING, so repeated calls are idempotent.
-   * Fails atomically if the task or any user does not exist (no partial writes).
+   *
+   * Rejects if:
+   *   - task does not exist (404)
+   *   - task is archived (400) — assigning to a closed task makes no sense
+   *   - any userId does not exist (404, with list of missing ids)
+   *
+   * Returns the FULL current list of assigned userIds (including pre-existing)
+   * so clients get authoritative state, not a copy of their input.
    */
   async assignUsers(taskId: number, userIds: number[]): Promise<AssignUsersResponseDto> {
     const uniqueIds = [...new Set(userIds)];
@@ -86,13 +93,14 @@ export class TasksService {
     if (!task) {
       throw new NotFoundException('TASK_NOT_FOUND', `Task with id ${taskId} not found`);
     }
+    if (task.status === 'archived') {
+      throw new ValidationException(
+        'TASK_ARCHIVED',
+        `Task ${taskId} is archived; cannot assign new users`,
+      );
+    }
 
-    const foundUsers = await this.users.find({
-      where: { id: In(uniqueIds) },
-      select: ['id'],
-    });
-    const foundIds = new Set(foundUsers.map((u) => u.id));
-    const missing = uniqueIds.filter((id) => !foundIds.has(id));
+    const missing = await this.usersService.findMissingIds(uniqueIds);
     if (missing.length > 0) {
       throw new NotFoundException(
         'USER_NOT_FOUND',
@@ -110,10 +118,17 @@ export class TasksService {
         .execute();
     }
 
+    // Return authoritative state: ALL assignees on the task now, not just the input.
+    const current = await this.assignments.find({
+      where: { taskId },
+      select: ['userId'],
+      order: { userId: 'ASC' },
+    });
+
     return {
       message: 'Users assigned successfully',
       taskId,
-      assignedUserIds: uniqueIds,
+      assignedUserIds: current.map((a) => a.userId),
     };
   }
 
@@ -122,19 +137,16 @@ export class TasksService {
    * completes, the task is archived exactly once and the notifier is fired
    * exactly once — enforced via pessimistic row lock on the tasks row plus a
    * status='open' guard on the archive update (two safety nets).
+   *
+   * Idempotent: repeat calls (double-click, retry) after the assignment has
+   * already been marked complete are a no-op that returns archived=false.
    */
   async completeByUser(taskId: number, userId: number): Promise<CompleteTaskResponseDto> {
-    // Pre-flight existence checks (outside tx for cleaner errors on invalid input)
-    const [taskExists, userExists] = await Promise.all([
-      this.tasks.exist({ where: { id: taskId } }),
-      this.users.exist({ where: { id: userId } }),
+    // Pre-flight existence checks outside tx for clean 404s on invalid input.
+    await Promise.all([
+      this.assertTaskExists(taskId),
+      this.usersService.assertExists(userId),
     ]);
-    if (!taskExists) {
-      throw new NotFoundException('TASK_NOT_FOUND', `Task with id ${taskId} not found`);
-    }
-    if (!userExists) {
-      throw new NotFoundException('USER_NOT_FOUND', `User with id ${userId} not found`);
-    }
 
     const result = await this.dataSource.transaction(async (manager) => {
       // 1) Serialize concurrent completes on the same task via pessimistic write lock.
@@ -159,18 +171,29 @@ export class TasksService {
         );
       }
 
-      // 3) Mark complete (idempotent — repeated calls / double-click no-op).
+      // 3) Data-integrity guard (audit M4): refuse to mutate an archived task
+      // if the assignment is inconsistent (uncompleted on archived task).
+      // Legitimate double-clicks after archiving hit assignment.completedAt != null
+      // below and short-circuit to no-op.
+      if (lockedTask.status === 'archived' && assignment.completedAt == null) {
+        throw new ValidationException(
+          'TASK_ARCHIVED',
+          `Task ${taskId} is archived; cannot record new completions`,
+        );
+      }
+
+      // 4) Mark complete (idempotent — repeated calls / double-click no-op).
       if (assignment.completedAt == null) {
         assignment.completedAt = new Date();
         await manager.save(assignment);
       }
 
-      // 4) Count remaining pending assignees within the same locked window.
+      // 5) Count remaining pending assignees within the same locked window.
       const remaining = await manager.count(TaskAssignment, {
         where: { taskId, completedAt: IsNull() },
       });
 
-      // 5) Archive iff still open AND no pending assignees. Guard prevents
+      // 6) Archive iff still open AND no pending assignees. Guard prevents
       //    double-archive if the row was already archived (defense in depth).
       let archived = false;
       if (remaining === 0 && lockedTask.status === 'open') {
@@ -206,5 +229,12 @@ export class TasksService {
       userId,
       archived: result.archived,
     };
+  }
+
+  private async assertTaskExists(id: number): Promise<void> {
+    const exists = await this.tasks.exists({ where: { id } });
+    if (!exists) {
+      throw new NotFoundException('TASK_NOT_FOUND', `Task with id ${id} not found`);
+    }
   }
 }

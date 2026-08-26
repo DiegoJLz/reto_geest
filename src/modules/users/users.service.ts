@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { QueryFailedError, Repository } from 'typeorm';
+import { In, QueryFailedError, Repository } from 'typeorm';
 import { ConflictException } from '../../common/exceptions/conflict.exception';
 import { NotFoundException } from '../../common/exceptions/not-found.exception';
 import { TaskAssignment } from '../tasks/entities/task-assignment.entity';
@@ -69,6 +69,32 @@ export class UsersService {
       throw new NotFoundException('USER_NOT_FOUND', `User with id ${id} not found`);
     }
     return user;
+  }
+
+  /**
+   * Throws if the user does not exist. Cheaper than findByIdOrFail when only
+   * existence matters (no entity hydration).
+   */
+  async assertExists(id: number): Promise<void> {
+    const found = await this.users.exists({ where: { id } });
+    if (!found) {
+      throw new NotFoundException('USER_NOT_FOUND', `User with id ${id} not found`);
+    }
+  }
+
+  /**
+   * Returns the subset of the given ids that do NOT exist. Useful for batch
+   * validation (e.g. `POST /tasks/:id/assign` with a list of userIds).
+   */
+  async findMissingIds(ids: number[]): Promise<number[]> {
+    if (ids.length === 0) return [];
+    const uniqueIds = [...new Set(ids)];
+    const found = await this.users.find({
+      where: { id: In(uniqueIds) },
+      select: ['id'],
+    });
+    const foundSet = new Set(found.map((u) => u.id));
+    return uniqueIds.filter((id) => !foundSet.has(id));
   }
 
   /**
