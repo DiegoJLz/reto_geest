@@ -10,7 +10,60 @@ El desarrollo se organiza en **sprints (S0–S5)**. `v1.0.0` se libera al cierre
 
 ## [Unreleased]
 
-Próximo: **S4 — Deploy a Render (prod+qa) + GitHub Actions CI/CD**.
+Próximo: **S5 — Extra (Swagger polish), UML, README final, release v1.0.0**.
+
+---
+
+## [S4] — 2026-08-25
+
+Deploy automatizado a Render + pipeline CI/CD. No cambia código de negocio.
+
+### Added
+- **`render.yaml`** — Infrastructure-as-Code Blueprint que declara:
+  - `geest-db` (PostgreSQL Free, compartida entre envs)
+  - `geest-api-prod` (Web Service Starter, rama `main`, no sleep)
+  - `geest-api-qa` (Web Service Free, rama `qa`, sleeps tras 15 min)
+  - `autoDeploy: false` en ambos web services → deploys los dispara GitHub Actions solo cuando CI pasa
+- **`.github/workflows/ci.yml`** — CI en cada PR y push a `develop`/`qa`/`main`:
+  - `lint` (ESLint)
+  - `unit-tests` (Jest, 52 tests)
+  - `e2e-tests` (Jest + Postgres 16 service container, 11 tests)
+  - `build` (nest build)
+  - `concurrency` cancel-in-progress por ref
+- **`.github/workflows/deploy.yml`** — CD en push a `main`/`qa` o via `workflow_dispatch`:
+  - Look up del service ID via Render API (`GET /v1/services?name=...`)
+  - `POST /v1/services/:id/deploys` para trigger
+  - Polling del status cada 10s hasta `live` o `*_failed` (timeout 15 min)
+  - **Graceful skip** si el servicio no existe todavía (antes de aplicar Blueprint) o si `RENDER_API_KEY` no está en el environment — emite warning en vez de fallar
+  - `environment: production|qa` dinámico según la rama (permite scoping de secrets)
+- **`docs/DEPLOY.md`** — guía end-to-end de setup inicial, workflow de deploy, rollback, troubleshooting
+
+### Changed
+- README linkea a `docs/DEPLOY.md`
+
+### GitHub workflow
+- **PRs mergeados**:
+  - #8 `ci(S4): Render Blueprint + GitHub Actions CI/CD`
+  - #9 `release: promote develop → qa (v0.5.0-rc)` — primera vez que qa recibe el código real
+  - #10 `release: promote qa → main (v0.5.0)` — primera vez que main recibe el código real
+- Labels: `type:chore, sprint:s4, priority:high`
+- Milestone S4 cerrado
+
+### Setup pendiente por parte del owner del repo (post-merge)
+1. Rotar `RENDER_API_KEY` (fue compartida por chat previamente)
+2. Duplicar el secret al environment `production` (ya está en `qa`)
+3. Apply Blueprint en https://dashboard.render.com/blueprints
+4. Setear `NOTIFY_URL` manualmente en el dashboard de cada web service
+5. Verificar `curl https://geest-api-prod.onrender.com/health` → 200
+
+### Verificado
+- CI runs green en `develop`, `qa`, `main` después de los merges
+- Deploy workflow ran en push a qa y main → **graceful skip con warning** (esperado, Blueprint aún no aplicado)
+- YAML syntax validado con `js-yaml.load` en los 3 archivos
+
+### Trade-offs documentados
+- **DB compartida** entre prod y qa: aceptable para reto de 7 días (evaluadores prueban solo prod). Aislamiento real requeriría 2 databases o schemas separados.
+- **Free plan en QA**: sleeps tras 15 min → cold start 30-60s en primera request. Aceptable porque QA es interno.
 
 ---
 
