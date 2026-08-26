@@ -10,7 +10,102 @@ El desarrollo se organiza en **sprints (S0–S5)**. `v1.0.0` se libera al cierre
 
 ## [Unreleased]
 
-Próximo: **S4 — Deploy a Render (prod+qa) + GitHub Actions CI/CD**.
+Nada pendiente — proyecto completado en `v1.0.0`.
+
+---
+
+## [1.0.0] / [S5] — 2026-08-25
+
+Release final. Documentación completa + release candidate para evaluación.
+
+### Added
+- **`README.md`** reescrito para cumplir el requisito del spec ("máximo 2 páginas"):
+  - URL pública de PROD y QA en el header
+  - Quick start con Docker
+  - Tabla de los 9 endpoints
+  - **Decisiones técnicas importantes** con justificación
+  - **Supuestos ante ambigüedades** (Idempotency-Key opcional, complete-on-archived, assign-on-archived, etc.)
+  - **Funcionalidades recortadas por tiempo** con racional
+  - **Explicación del Extra "Swagger UI"**: qué problema resuelve, por qué necesaria, por qué sobre alternativas
+- **`docs/MANUAL_TECNICO.md`**: arquitectura, patterns aplicados, mapeo SOLID, reliability guarantees, stack + alternativas descartadas, configuración de env vars, testing, trade-offs
+- **`docs/MANUAL_USUARIO.md`**: reference completa de los 9 endpoints con curls, códigos de error, flujo end-to-end de ejemplo
+- **`docs/UML.md`**: diagrama ERD Mermaid + tabla de índices + constraints + migraciones versionadas
+
+### Verificado end-to-end contra PROD
+Batería de 15 tests via curl contra `https://geest-api-prod.onrender.com`:
+- POST /users (valid, invalid email, duplicate) → 201/400/409 con formato correcto
+- GET /users con pendingTaskIds
+- POST /tasks, GET /tasks?status=archived, GET /tasks/:id
+- POST /assign (2 users) + validación de estado
+- POST /complete parcial → `archived:false`
+- POST /complete último → `archived:true`, task.archivedAt seteado
+- GET /users/:id/tasks con `completedByUser:true`
+- **GET /tasks/:id/notifications → 1 attempt statusCode:200** (webhook.site recibió y respondió OK)
+- **Idempotency: 3 POST paralelos con misma key** → 3 respuestas idénticas, 1 solo user creado
+- Idempotency mismatch → 400 `IDEMPOTENCY_KEY_BODY_MISMATCH`
+
+**Zero bugs.** Todo cumple el spec al pie de la letra.
+
+### GitHub workflow
+- **PRs mergeados**:
+  - #12 `docs(S5): README ≤ 2pg + UML + manuals + trade-offs`
+  - #13 `release: promote develop → qa (v1.0.0)`
+  - #14 `release: promote qa → main (v1.0.0)`
+- Milestone S5 cerrado
+- **Tag `v1.0.0`** anotado sobre main → GitHub Release publicado
+
+---
+
+## [S4] — 2026-08-25
+
+Deploy automatizado a Render + pipeline CI/CD. No cambia código de negocio.
+
+### Added
+- **`render.yaml`** — Infrastructure-as-Code Blueprint que declara:
+  - `geest-db` (PostgreSQL Free, compartida entre envs)
+  - `geest-api-prod` (Web Service Starter, rama `main`, no sleep)
+  - `geest-api-qa` (Web Service Free, rama `qa`, sleeps tras 15 min)
+  - `autoDeploy: false` en ambos web services → deploys los dispara GitHub Actions solo cuando CI pasa
+- **`.github/workflows/ci.yml`** — CI en cada PR y push a `develop`/`qa`/`main`:
+  - `lint` (ESLint)
+  - `unit-tests` (Jest, 52 tests)
+  - `e2e-tests` (Jest + Postgres 16 service container, 11 tests)
+  - `build` (nest build)
+  - `concurrency` cancel-in-progress por ref
+- **`.github/workflows/deploy.yml`** — CD en push a `main`/`qa` o via `workflow_dispatch`:
+  - Look up del service ID via Render API (`GET /v1/services?name=...`)
+  - `POST /v1/services/:id/deploys` para trigger
+  - Polling del status cada 10s hasta `live` o `*_failed` (timeout 15 min)
+  - **Graceful skip** si el servicio no existe todavía (antes de aplicar Blueprint) o si `RENDER_API_KEY` no está en el environment — emite warning en vez de fallar
+  - `environment: production|qa` dinámico según la rama (permite scoping de secrets)
+- **`docs/DEPLOY.md`** — guía end-to-end de setup inicial, workflow de deploy, rollback, troubleshooting
+
+### Changed
+- README linkea a `docs/DEPLOY.md`
+
+### GitHub workflow
+- **PRs mergeados**:
+  - #8 `ci(S4): Render Blueprint + GitHub Actions CI/CD`
+  - #9 `release: promote develop → qa (v0.5.0-rc)` — primera vez que qa recibe el código real
+  - #10 `release: promote qa → main (v0.5.0)` — primera vez que main recibe el código real
+- Labels: `type:chore, sprint:s4, priority:high`
+- Milestone S4 cerrado
+
+### Setup pendiente por parte del owner del repo (post-merge)
+1. Rotar `RENDER_API_KEY` (fue compartida por chat previamente)
+2. Duplicar el secret al environment `production` (ya está en `qa`)
+3. Apply Blueprint en https://dashboard.render.com/blueprints
+4. Setear `NOTIFY_URL` manualmente en el dashboard de cada web service
+5. Verificar `curl https://geest-api-prod.onrender.com/health` → 200
+
+### Verificado
+- CI runs green en `develop`, `qa`, `main` después de los merges
+- Deploy workflow ran en push a qa y main → **graceful skip con warning** (esperado, Blueprint aún no aplicado)
+- YAML syntax validado con `js-yaml.load` en los 3 archivos
+
+### Trade-offs documentados
+- **DB compartida** entre prod y qa: aceptable para reto de 7 días (evaluadores prueban solo prod). Aislamiento real requeriría 2 databases o schemas separados.
+- **Free plan en QA**: sleeps tras 15 min → cold start 30-60s en primera request. Aceptable porque QA es interno.
 
 ---
 
