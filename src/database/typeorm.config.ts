@@ -1,8 +1,13 @@
 import { TypeOrmModuleOptions } from '@nestjs/typeorm';
+import { User } from '../modules/users/entities/user.entity';
+import { Task } from '../modules/tasks/entities/task.entity';
+import { TaskAssignment } from '../modules/tasks/entities/task-assignment.entity';
+import { InitialSchema1735260000000 } from './migrations/1735260000000-InitialSchema';
 
 export function typeOrmConfig(): TypeOrmModuleOptions {
   const useUrl = !!process.env.DATABASE_URL;
-  const ssl = process.env.DB_SSL === 'true' || process.env.NODE_ENV === 'production';
+  const isProd = process.env.NODE_ENV === 'production';
+  const ssl = process.env.DB_SSL === 'true' || isProd;
 
   return {
     type: 'postgres',
@@ -16,9 +21,9 @@ export function typeOrmConfig(): TypeOrmModuleOptions {
           database: process.env.DB_NAME ?? 'geest',
         }),
     ssl: ssl ? { rejectUnauthorized: false } : false,
-    entities: [__dirname + '/../**/*.entity.{ts,js}'],
-    migrations: [__dirname + '/migrations/*.{ts,js}'],
-    migrationsRun: false,
+    entities: [User, Task, TaskAssignment],
+    migrations: [InitialSchema1735260000000],
+    migrationsRun: isProd || process.env.AUTO_RUN_MIGRATIONS === 'true',
     synchronize: false,
     logging: process.env.NODE_ENV === 'development' ? ['error', 'warn'] : ['error'],
   };
