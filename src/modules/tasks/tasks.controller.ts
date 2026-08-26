@@ -10,6 +10,8 @@ import {
   Query,
 } from '@nestjs/common';
 import { ApiOperation, ApiParam, ApiTags } from '@nestjs/swagger';
+import { AssignUsersDto, AssignUsersResponseDto } from './dto/assign-users.dto';
+import { CompleteTaskDto, CompleteTaskResponseDto } from './dto/complete-task.dto';
 import { CreateTaskDto } from './dto/create-task.dto';
 import { ListTasksQueryDto } from './dto/list-tasks.query.dto';
 import { TaskResponseDto } from './dto/task-response.dto';
@@ -38,5 +40,30 @@ export class TasksController {
   @ApiParam({ name: 'id', type: Number })
   async findOne(@Param('id', ParseIntPipe) id: number): Promise<TaskResponseDto> {
     return this.tasksService.findByIdWithAssignees(id);
+  }
+
+  @Post(':id/assign')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Assign a batch of users to the task (duplicates ignored)' })
+  @ApiParam({ name: 'id', type: Number })
+  async assign(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: AssignUsersDto,
+  ): Promise<AssignUsersResponseDto> {
+    return this.tasksService.assignUsers(id, dto.userIds);
+  }
+
+  @Post(':id/complete')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      "Mark this user's part of the task as complete. When last pending assignee completes, task auto-archives (exactly once).",
+  })
+  @ApiParam({ name: 'id', type: Number })
+  async complete(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: CompleteTaskDto,
+  ): Promise<CompleteTaskResponseDto> {
+    return this.tasksService.completeByUser(id, dto.userId);
   }
 }

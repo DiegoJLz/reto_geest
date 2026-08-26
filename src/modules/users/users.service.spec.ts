@@ -105,9 +105,7 @@ describe('UsersService', () => {
           { userId: '2', taskId: '20' },
         ]),
       };
-      assignmentsRepo.createQueryBuilder.mockReturnValue(
-        qb as unknown as ReturnType<Repository<TaskAssignment>['createQueryBuilder']>,
-      );
+      assignmentsRepo.createQueryBuilder.mockReturnValue(qb as never);
 
       const result = await service.findAll();
 
@@ -126,6 +124,49 @@ describe('UsersService', () => {
     it('throws NotFoundException when missing', async () => {
       usersRepo.findOne.mockResolvedValue(null);
       await expect(service.findByIdOrFail(999)).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+
+  // ---------- getUserTasks (S2) ----------
+  describe('getUserTasks', () => {
+    it('throws NotFoundException when user does not exist', async () => {
+      usersRepo.findOne.mockResolvedValue(null);
+      await expect(service.getUserTasks(42)).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('returns tasks with per-user completion state', async () => {
+      usersRepo.findOne.mockResolvedValue(buildUser({ id: 1 }));
+      const completedDate = new Date('2026-08-25T20:00:00Z');
+      const qb = {
+        innerJoin: jest.fn().mockReturnThis(),
+        select: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        getRawMany: jest.fn().mockResolvedValue([
+          { taskId: '10', title: 'A', status: 'open', completedAt: null },
+          { taskId: '11', title: 'B', status: 'archived', completedAt: completedDate },
+        ]),
+      };
+      assignmentsRepo.createQueryBuilder.mockReturnValue(qb as never);
+
+      const result = await service.getUserTasks(1);
+
+      expect(result).toEqual([
+        {
+          taskId: 10,
+          title: 'A',
+          status: 'open',
+          completedByUser: false,
+          completedAt: null,
+        },
+        {
+          taskId: 11,
+          title: 'B',
+          status: 'archived',
+          completedByUser: true,
+          completedAt: completedDate.toISOString(),
+        },
+      ]);
     });
   });
 });
