@@ -5,6 +5,7 @@ import { ConflictException } from '../../common/exceptions/conflict.exception';
 import { NotFoundException } from '../../common/exceptions/not-found.exception';
 import { TaskAssignment } from '../tasks/entities/task-assignment.entity';
 import { Task } from '../tasks/entities/task.entity';
+import { UserTaskResponseDto } from './dto/user-tasks-response.dto';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UserResponseDto, UserWithPendingTasksDto } from './dto/user-response.dto';
 import { User } from './entities/user.entity';
@@ -68,6 +69,35 @@ export class UsersService {
       throw new NotFoundException('USER_NOT_FOUND', `User with id ${id} not found`);
     }
     return user;
+  }
+
+  /**
+   * Returns all tasks the user is assigned to, indicating whether
+   * this specific user has completed their part or not.
+   */
+  async getUserTasks(userId: number): Promise<UserTaskResponseDto[]> {
+    await this.findByIdOrFail(userId);
+
+    const rows = await this.assignments
+      .createQueryBuilder('a')
+      .innerJoin(Task, 't', 't.id = a.task_id')
+      .select([
+        't.id AS "taskId"',
+        't.title AS "title"',
+        't.status AS "status"',
+        'a.completed_at AS "completedAt"',
+      ])
+      .where('a.user_id = :userId', { userId })
+      .orderBy('t.id', 'ASC')
+      .getRawMany<{ taskId: string; title: string; status: string; completedAt: Date | null }>();
+
+    return rows.map((r) => ({
+      taskId: Number(r.taskId),
+      title: r.title,
+      status: r.status as UserTaskResponseDto['status'],
+      completedByUser: r.completedAt != null,
+      completedAt: r.completedAt ? new Date(r.completedAt).toISOString() : null,
+    }));
   }
 
   private isUniqueViolation(err: QueryFailedError): boolean {
