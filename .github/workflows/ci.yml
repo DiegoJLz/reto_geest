@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main, qa, develop]
+  push:
+    branches: [main, qa, develop]
+
+# Cancela runs previos en la misma rama/PR si llega uno nuevo.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci --no-audit --no-fund
+      - run: npm run lint
+
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci --no-audit --no-fund
+      - run: npm test
+
+  e2e-tests:
+    name: E2E integration tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: geest
+          POSTGRES_PASSWORD: geest
+          POSTGRES_DB: geest_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U geest -d geest_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      NODE_ENV: test
+      DB_HOST: localhost
+      DB_PORT: '5432'
+      DB_USER: geest
+      DB_PASSWORD: geest
+      DB_NAME: geest_test
+      DB_SSL: 'false'
+      AUTO_RUN_MIGRATIONS: 'true'
+      NOTIFY_URL: http://127.0.0.1:9999/placeholder
+      NOTIFY_MAX_ATTEMPTS: '3'
+      NOTIFY_INITIAL_BACKOFF_MS: '10'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci --no-audit --no-fund
+      - name: Wait for Postgres
+        run: |
+          for i in {1..10}; do
+            pg_isready -h localhost -U geest -d geest_test && break
+            sleep 2
+          done
+        env:
+          PGPASSWORD: geest
+      - run: npm run test:e2e
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
