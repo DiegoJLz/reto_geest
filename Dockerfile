@@ -14,6 +14,9 @@ FROM node:20-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 
+# wget for healthcheck (Alpine ships busybox wget by default; ensure present)
+RUN apk add --no-cache wget
+
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/package*.json ./
