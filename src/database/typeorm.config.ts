@@ -7,7 +7,10 @@ import { InitialSchema1735260000000 } from './migrations/1735260000000-InitialSc
 export function typeOrmConfig(): TypeOrmModuleOptions {
   const useUrl = !!process.env.DATABASE_URL;
   const isProd = process.env.NODE_ENV === 'production';
-  const ssl = process.env.DB_SSL === 'true' || isProd;
+  // SSL is opt-in via DB_SSL=true. Managed providers (Render, Neon, Supabase) require it;
+  // local Postgres in Docker does not. If DATABASE_URL is set and DB_SSL is not, default to true.
+  const ssl =
+    process.env.DB_SSL === 'true' || (useUrl && process.env.DB_SSL === undefined);
 
   return {
     type: 'postgres',
