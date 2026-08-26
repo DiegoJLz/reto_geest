@@ -1,0 +1,125 @@
+name: Deploy to Render
+
+# Solo se dispara al hacer merge a main o qa. La CI corre primero (ci.yml)
+# porque también se dispara en push. Si CI falla, el deploy sigue igual
+# porque son workflows independientes — para forzar orden estricto,
+# considerar `workflow_run` trigger o branch protection con required checks.
+
+on:
+  push:
+    branches: [main, qa]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Target environment (prod|qa)'
+        required: true
+        default: 'qa'
+        type: choice
+        options: [prod, qa]
+
+concurrency:
+  # Un deploy por env a la vez — si llega otro push, cancela el anterior.
+  group: deploy-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Deploy ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    # El secret RENDER_API_KEY debe estar en este environment.
+    # Para prod: agregar el secret al environment "production" (mismo valor
+    # o key distinta). Para qa: ya está en el environment "qa".
+    environment:
+      name: ${{ (github.ref_name == 'main' || github.event.inputs.target == 'prod') && 'production' || 'qa' }}
+      url: ${{ steps.deploy.outputs.url }}
+    steps:
+      - name: Resolve target service name
+        id: target
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TARGET="${{ github.event.inputs.target }}"
+          elif [ "${{ github.ref_name }}" = "main" ]; then
+            TARGET="prod"
+          else
+            TARGET="qa"
+          fi
+          if [ "$TARGET" = "prod" ]; then
+            SERVICE_NAME="geest-api-prod"
+          else
+            SERVICE_NAME="geest-api-qa"
+          fi
+          echo "target=$TARGET" >> "$GITHUB_OUTPUT"
+          echo "service_name=$SERVICE_NAME" >> "$GITHUB_OUTPUT"
+          echo "Deploying $SERVICE_NAME ($TARGET) from ${{ github.ref_name }}@${{ github.sha }}"
+
+      - name: Look up Render service ID by name
+        id: lookup
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+        run: |
+          if [ -z "$RENDER_API_KEY" ]; then
+            echo "::warning::RENDER_API_KEY not set in this environment. Skipping deploy. Add it under Settings > Environments > Secrets and re-run."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          RESP=$(curl -sS \
+            -H "Authorization: Bearer $RENDER_API_KEY" \
+            -H "Accept: application/json" \
+            "https://api.render.com/v1/services?name=${{ steps.target.outputs.service_name }}&limit=1")
+          SVC_ID=$(echo "$RESP" | jq -r '.[0].service.id // empty')
+          if [ -z "$SVC_ID" ]; then
+            echo "::warning::Service '${{ steps.target.outputs.service_name }}' not found in Render yet. Provision the Blueprint (see docs/DEPLOY.md) and push again."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "id=$SVC_ID" >> "$GITHUB_OUTPUT"
+          echo "url=https://dashboard.render.com/web/$SVC_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger deploy
+        id: deploy
+        if: steps.lookup.outputs.skip != 'true'
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+        run: |
+          RESP=$(curl -sS -X POST \
+            -H "Authorization: Bearer $RENDER_API_KEY" \
+            -H "Accept: application/json" \
+            -H "Content-Type: application/json" \
+            "https://api.render.com/v1/services/${{ steps.lookup.outputs.id }}/deploys" \
+            -d '{"clearCache":"do_not_clear"}')
+          DEPLOY_ID=$(echo "$RESP" | jq -r '.id // empty')
+          if [ -z "$DEPLOY_ID" ]; then
+            echo "::error::Deploy trigger failed. Response: $RESP"
+            exit 1
+          fi
+          echo "id=$DEPLOY_ID" >> "$GITHUB_OUTPUT"
+          echo "url=${{ steps.lookup.outputs.url }}/deploys/$DEPLOY_ID" >> "$GITHUB_OUTPUT"
+          echo "::notice::Deploy $DEPLOY_ID triggered for ${{ steps.target.outputs.service_name }}"
+          echo "View: ${{ steps.lookup.outputs.url }}/deploys/$DEPLOY_ID"
+
+      - name: Wait for deploy to reach a terminal state
+        if: steps.lookup.outputs.skip != 'true'
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+        timeout-minutes: 15
+        run: |
+          for i in $(seq 1 90); do
+            STATUS=$(curl -sS \
+              -H "Authorization: Bearer $RENDER_API_KEY" \
+              -H "Accept: application/json" \
+              "https://api.render.com/v1/services/${{ steps.lookup.outputs.id }}/deploys/${{ steps.deploy.outputs.id }}" \
+              | jq -r '.status')
+            echo "[$i] deploy status: $STATUS"
+            case "$STATUS" in
+              live)
+                echo "::notice::Deploy live!"
+                exit 0 ;;
+              build_failed|update_failed|canceled|deactivated)
+                echo "::error::Deploy ended in state: $STATUS"
+                exit 1 ;;
+            esac
+            sleep 10
+          done
+          echo "::warning::Timed out waiting for deploy. Check the Render dashboard."
+          exit 1

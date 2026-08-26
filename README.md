@@ -59,6 +59,8 @@ npm run test:e2e    # end-to-end
 
 ## Documentación adicional
 
+- [Changelog / historial de sprints](./CHANGELOG.md)
+- [Guía de deploy (Render + GitHub Actions)](./docs/DEPLOY.md)
 - [Manual técnico](./docs/MANUAL_TECNICO.md) *(pendiente)*
 - [Manual de usuario](./docs/MANUAL_USUARIO.md) *(pendiente)*
 - [UML de la BD](./docs/UML.md) *(pendiente)*
