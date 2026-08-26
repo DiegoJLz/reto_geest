@@ -1,4 +1,10 @@
-import { ArgumentsHost, Catch, ExceptionFilter, HttpException, Logger } from '@nestjs/common';
+import {
+  ArgumentsHost,
+  Catch,
+  ExceptionFilter,
+  HttpException,
+  Logger,
+} from '@nestjs/common';
 import { Request, Response } from 'express';
 import { DomainException } from '../exceptions/domain.exception';
 
@@ -59,11 +65,17 @@ export class GlobalExceptionFilter implements ExceptionFilter {
         ? (respObj.message as string[]).join('; ')
         : ((respObj.message as string) ?? exception.message);
 
+      // Always prefer machine-readable code from the HTTP status over the
+      // human-readable `error` field ("Bad Request", "Not Found") that Nest
+      // populates by default. This keeps the API contract uniform:
+      // { error: { code: "VALIDATION_ERROR", ... } } instead of code: "Bad Request".
+      const code = this.codeFromStatus(status);
+
       return {
         status,
         body: {
           error: {
-            code: (respObj.error as string) ?? this.codeFromStatus(status),
+            code,
             message,
             ...(Array.isArray(respObj.message) ? { details: respObj.message } : {}),
           },
@@ -72,12 +84,14 @@ export class GlobalExceptionFilter implements ExceptionFilter {
     }
 
     const err = exception as Error;
+    const isProd = process.env.NODE_ENV === 'production';
     return {
       status: 500,
       body: {
         error: {
           code: 'INTERNAL_ERROR',
-          message: err?.message ?? 'Unexpected error',
+          // Never leak raw error messages (SQL fragments, stack info) to clients in prod.
+          message: isProd ? 'Internal server error' : (err?.message ?? 'Unexpected error'),
         },
       },
     };

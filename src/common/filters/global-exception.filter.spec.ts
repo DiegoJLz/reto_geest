@@ -43,7 +43,8 @@ describe('GlobalExceptionFilter', () => {
     filter.catch(err, host);
     expect(status).toHaveBeenCalledWith(400);
     const body = json.mock.calls[0][0];
-    expect(body.error.code).toBe('Bad Request');
+    // Machine-readable code from HTTP status; never "Bad Request" (audit M8/M9).
+    expect(body.error.code).toBe('VALIDATION_ERROR');
     expect(body.error.details).toEqual(['email must be a valid email address', 'name is required']);
   });
 

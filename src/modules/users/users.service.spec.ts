@@ -32,6 +32,7 @@ describe('UsersService', () => {
             save: jest.fn(),
             find: jest.fn(),
             findOne: jest.fn(),
+            exists: jest.fn(),
           },
         },
         {
@@ -124,6 +125,41 @@ describe('UsersService', () => {
     it('throws NotFoundException when missing', async () => {
       usersRepo.findOne.mockResolvedValue(null);
       await expect(service.findByIdOrFail(999)).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+
+  // ---------- assertExists / findMissingIds (S3 refactor for audit M6) ----------
+  describe('assertExists', () => {
+    it('resolves silently when user exists', async () => {
+      usersRepo.exists.mockResolvedValue(true);
+      await expect(service.assertExists(1)).resolves.toBeUndefined();
+    });
+
+    it('throws NotFoundException when user missing', async () => {
+      usersRepo.exists.mockResolvedValue(false);
+      await expect(service.assertExists(999)).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+
+  describe('findMissingIds', () => {
+    it('returns [] for empty input', async () => {
+      const missing = await service.findMissingIds([]);
+      expect(missing).toEqual([]);
+      expect(usersRepo.find).not.toHaveBeenCalled();
+    });
+
+    it('returns only the ids that do NOT exist', async () => {
+      usersRepo.find.mockResolvedValue([{ id: 1 } as User, { id: 3 } as User]);
+      const missing = await service.findMissingIds([1, 2, 3, 4]);
+      expect(missing).toEqual([2, 4]);
+    });
+
+    it('deduplicates input before querying', async () => {
+      usersRepo.find.mockResolvedValue([{ id: 1 } as User]);
+      await service.findMissingIds([1, 1, 1]);
+      const findArgs = usersRepo.find.mock.calls[0][0]!;
+      // The In() call should receive [1] not [1, 1, 1]
+      expect(JSON.stringify(findArgs.where)).toContain('"_value":[1]');
     });
   });
 

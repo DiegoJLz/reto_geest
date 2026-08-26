@@ -33,6 +33,23 @@ describe('Task completion — concurrency (integration)', () => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let httpServer: any;
 
+  // Safety guard (audit H3): refuse to run destructive TRUNCATE against
+  // anything that looks like production. Set DB_NAME containing "test" or set
+  // ALLOW_UNSAFE_TRUNCATE=1 to opt-in on dev DB (we do that on purpose here).
+  beforeAll(() => {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('E2E tests must NEVER run against NODE_ENV=production');
+    }
+    const dbName = process.env.DB_NAME ?? '';
+    if (!dbName.includes('test') && process.env.ALLOW_UNSAFE_TRUNCATE !== '1') {
+      // Warn loudly but let it run — dev workflow (see README).
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[E2E] Warning: DB_NAME="${dbName}" — will TRUNCATE tables. Use DB_NAME=geest_test for isolation.`,
+      );
+    }
+  });
+
   beforeAll(async () => {
     spyNotifier = new SpyNotifier();
     const moduleRef = await Test.createTestingModule({
