@@ -10,7 +10,69 @@ El desarrollo se organiza en **sprints (S0–S5)**. `v1.0.0` se libera al cierre
 
 ## [Unreleased]
 
-Próximo: **S2 — Assignments, Complete y archivado atómico**.
+Próximo: **S3 — Idempotency-Key + Notifications con reintentos exponenciales**.
+
+---
+
+## [S2] — 2026-08-25
+
+Assignments, completado por usuario y archivado atómico exactly-once. Establece
+la base de reliability que S3 extiende con idempotencia HTTP y reintentos.
+
+### Added
+- **Endpoint `POST /tasks/:id/assign`** (`AssignUsersDto`)
+  - Body `{ userIds: number[] }`, valida array no vacío + ints
+  - Deduplica userIds antes de insertar
+  - Verifica atómicamente que la task y TODOS los users existan → 404 con lista de missing
+  - Insert vía `INSERT ... ON CONFLICT DO NOTHING` (Postgres) → idempotente
+  - Retorna `{ message, taskId, assignedUserIds }`
+- **Endpoint `POST /tasks/:id/complete`** (`CompleteTaskDto`)
+  - Body `{ userId: number }`
+  - Transacción con `SELECT ... FOR UPDATE` (pessimistic write lock) sobre la fila de `tasks`
+  - Idempotente por naturaleza: assignment ya completado = no-op
+  - Cuando el último assignee completa → `UPDATE tasks SET status='archived', archived_at=now()` **solo si** `status='open'` (guard de defensa contra doble archivo)
+  - Retorna `{ message, taskId, userId, archived: bool }`
+- **Endpoint `GET /users/:id/tasks`** (`UserTaskResponseDto`)
+  - Lista tareas asignadas al user con `completedByUser` boolean y `completedAt`
+- **Strategy Pattern para notificaciones** (`src/modules/tasks/notifications/task-archived-notifier.ts`)
+  - `TaskArchivedNotifier` interface + `TASK_ARCHIVED_NOTIFIER` DI token
+  - `LoggerTaskArchivedNotifier` impl (noop-with-log) en S2
+  - S3 reemplaza el provider por HTTP+retry sin tocar `TasksService` (Open/Closed principle)
+  - Se dispara AFTER commit y solo cuando la transacción archivó (exactly-once)
+
+### Reliability guarantees probadas
+Exactly-once archiving y notification bajo concurrencia real (`Promise.all`), validados con Postgres real vía integration tests. La combinación de row-lock + guard `status='open'` da dos capas de defensa contra doble archivo.
+
+### Testing
+- **28/28 unit tests** (+10 nuevos): `assignUsers` (dedup/task-missing/users-missing), `completeByUser` (task-missing/user-missing/not-assigned/partial/archives-last/no-op-if-archived/no-op-if-already-completed), `getUserTasks` (user-missing/returns-with-state)
+- **4/4 e2e integration tests** en `test/task-completion.e2e-spec.ts` (comando `npm run test:e2e`, requiere docker db)
+  - Archivado + notify exactly-once bajo `Promise.all` de los 2 últimos assignees
+  - 5 completes en paralelo del mismo user → 1 archive, 1 notify
+  - Error format correcto cuando user no está asignado
+  - Assign es idempotente ante duplicados
+
+### Fixed
+- **`TasksService` ahora usa `Repository.exist()` para pre-flight checks** — más eficiente que `findOne()` cuando solo importa existencia (evita hidratar entities).
+
+### Changed
+- `.env.example`: agregada nota sobre conflicto de puerto 5432 con Postgres nativo (recomendado `DB_PORT=5433` en Windows/Mac con Postgres instalado)
+
+### GitHub workflow
+- **PR mergeado**: #4 `feat(S2): assignments + complete + atomic archiving`
+- Labels: `type:feature, sprint:s2, priority:high, reliability`
+- Milestone S2 cerrado
+
+### Verified end-to-end (Docker)
+```
+POST /users x2 (Ana, Beto)
+POST /tasks (Demo S2)
+POST /tasks/1/assign { userIds:[1,2] }         → 200 { assignedUserIds:[1,2] }
+POST /tasks/1/complete { userId:1 }            → 200 { archived:false }
+GET  /tasks/1                                  → status:open, 2 assignees, 1 completed
+GET  /users/1/tasks                            → [ { completedByUser:true } ]
+POST /tasks/1/complete { userId:2 }            → 200 { archived:true }
+GET  /tasks/1                                  → status:archived, archivedAt set
+```
 
 ---
 
