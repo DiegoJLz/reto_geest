@@ -10,7 +10,116 @@ El desarrollo se organiza en **sprints (S0–S5)**. `v1.0.0` se libera al cierre
 
 ## [Unreleased]
 
-Próximo: **S3 — Idempotency-Key + Notifications con reintentos exponenciales**.
+Próximo: **S4 — Deploy a Render (prod+qa) + GitHub Actions CI/CD**.
+
+---
+
+## [S3] — 2026-08-25
+
+Reliability completa. Idempotency HTTP + notifier con reintentos exponenciales.
+Cierra los 9 endpoints del spec y trae los fixes del code review previo.
+
+### Added
+- **`IdempotencyModule`** (`src/modules/idempotency/`)
+  - Interceptor global (`APP_INTERCEPTOR`) sobre POSTs — opt-in via header `Idempotency-Key`
+  - Tabla `idempotency_keys` con PK compuesta `(key, endpoint)` — mismo key puede usarse en distintos endpoints sin colisión
+  - Postgres `UNIQUE` serializa concurrent claims (winner via INSERT, losers ven la row y esperan/retornan cache)
+  - Contract:
+    - Mismo key + mismo body → 200/201 con cached response, ejecutado 1 vez
+    - Mismo key + body diferente → 400 `IDEMPOTENCY_KEY_BODY_MISMATCH`
+    - Mismo key aún en vuelo → poll hasta 5s, luego cache o 409 `IDEMPOTENCY_KEY_IN_PROGRESS`
+    - Sin key → passthrough normal
+- **`NotificationsModule`** (`src/modules/notifications/`)
+  - `HttpTaskArchivedNotifier` reemplaza el `LoggerNoop` de S2 via DI swap (Open/Closed — `TasksService` no cambió)
+  - Backoff exponencial: `500ms → 1000ms → 2000ms` (configurable via `NOTIFY_INITIAL_BACKOFF_MS` + `NOTIFY_MAX_ATTEMPTS`)
+  - Retriable: 5xx + errores de red. Non-retriable: 2xx, 4xx.
+  - Cada intento persistido en `notification_attempts` (número, statusCode, errorMessage, timestamp)
+  - `NotificationsService.getAttemptsForTask()` alimenta el nuevo endpoint
+- **Nuevo endpoint `GET /tasks/:id/notifications`** — lista intentos ordenados por número
+
+### Fixed (audit)
+- **M8/M9** `GlobalExceptionFilter` — devuelve códigos machine-readable (`VALIDATION_ERROR`, `NOT_FOUND`) en vez de "Bad Request"/"Not Found". Cumple el "código uniforme" del spec.
+- **M6** `TasksService` — ya no inyecta `User` repo (violación de boundary). Ahora usa `UsersService.assertExists()` y `UsersService.findMissingIds()`.
+- **M2** `assignUsers` — retorna estado authoritativo (todos los assignees actuales), no el eco del input.
+- **M3** `assignUsers` — rechaza asignar a task archivada → 400 `TASK_ARCHIVED`.
+- **M4** `completeByUser` — detecta estado inconsistente (task archived + assignment no completado) y throws `TASK_ARCHIVED`. Double-click sobre task ya archivada con assignment ya completado sigue siendo idempotent no-op.
+- **M7** Nuevo partial index `ix_task_assignments_user_pending (user_id) WHERE completed_at IS NULL` para optimizar la query de `GET /users`.
+- **H3** e2e safety guard — refuse to TRUNCATE si `NODE_ENV=production`.
+- **L1** `repo.exist()` → `repo.exists()` (deprecation).
+- **Bonus**: `GlobalExceptionFilter` oculta `err.message` en 500s cuando `NODE_ENV=production` (no info leak).
+
+### Changed
+- `UsersModule` exporta `UsersService` (necesario para `TasksModule`).
+- `TasksModule` importa `UsersModule` y `NotificationsModule`.
+- `AppModule` importa `IdempotencyModule` (activa el interceptor global).
+- Ya no se declara el provider `LoggerTaskArchivedNotifier` en `TasksModule` — `NotificationsModule` provee la implementación HTTP.
+- `test:e2e` script ahora usa `--runInBand` (evita deadlock por TRUNCATE concurrente entre suites).
+
+### DB schema (nueva migración `1735260060000-AddIdempotencyAndNotifications`)
+```sql
+CREATE TABLE notification_attempts (
+  id BIGSERIAL PRIMARY KEY,
+  task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  attempt_number INTEGER NOT NULL,
+  status_code INTEGER,
+  error_message TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX ix_notification_attempts_task ON notification_attempts(task_id);
+
+CREATE TABLE idempotency_keys (
+  key VARCHAR(200) NOT NULL,
+  endpoint VARCHAR(100) NOT NULL,
+  request_hash CHAR(64) NOT NULL,
+  status VARCHAR(20) NOT NULL DEFAULT 'processing'
+    CHECK (status IN ('processing', 'completed')),
+  status_code INTEGER,
+  response_body JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  completed_at TIMESTAMPTZ,
+  PRIMARY KEY (key, endpoint)
+);
+CREATE INDEX ix_idempotency_keys_created_at ON idempotency_keys(created_at);
+
+-- Audit M7
+CREATE INDEX ix_task_assignments_user_pending
+  ON task_assignments(user_id) WHERE completed_at IS NULL;
+```
+
+### Testing
+- **52/52 unit tests** (+24)
+  - `IdempotencyService` x9 (hash determinism, claim decisions, storeResponse, releaseFailed)
+  - `HttpTaskArchivedNotifier` x5 (2xx success, 4xx non-retry, 5xx retry x3, network error, missing NOTIFY_URL)
+  - `NotificationsService` x2 (task not found, returns attempts ordered)
+  - `UsersService` audit x5 (assertExists, findMissingIds dedup + return correct diff)
+  - `TasksService` audit x8 (M2 real state, M3 archived reject, M4 inconsistent state guard, más tests de completeByUser)
+- **11/11 e2e integration tests** (+7 en `test/reliability.e2e-spec.ts`)
+  - 3 parallel POST /users con mismo Idempotency-Key → 1 user creado, mismos bodies
+  - Body mismatch → 400 `IDEMPOTENCY_KEY_BODY_MISMATCH`
+  - Sin key → cada POST crea nuevo recurso
+  - Same key en endpoints distintos → OK (composite PK)
+  - Notify success end-to-end + GET /notifications
+  - Notify 5xx → retry x3, attempts persistidos y queryables
+  - GET /notifications para task inexistente → 404
+
+### GitHub workflow
+- **PR mergeado**: #6 `feat(S3): Idempotency-Key + HTTP notifier with retries + audit fixes`
+- Labels: `type:feature, sprint:s3, priority:high, reliability`
+- Milestone S3 cerrado
+
+### Verified end-to-end (Docker)
+```
+POST /users [Idempotency-Key: demo-key-1] body A     → 201 { id:2, ... }
+POST /users [Idempotency-Key: demo-key-1] body A     → 201 { id:2, ... }  (misma respuesta, un solo user)
+POST /users [Idempotency-Key: demo-key-1] body B     → 400 IDEMPOTENCY_KEY_BODY_MISMATCH
+9 endpoints del spec registrados y respondiendo
+```
+
+### Deferred (documentar en README de S5 como trade-offs)
+- Pagination en GET /tasks / GET /users (H1/M5) — no requerido por spec
+- Bigint precision más allá de 2^53 (H2) — teórico, no aplica a este scope
+- Auth de Swagger en prod (L4) — evaluable en S4
+- Health check con ping a DB (L2) — considerar en S4 con `/ready`
 
 ---
 
