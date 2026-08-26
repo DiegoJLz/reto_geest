@@ -66,9 +66,19 @@ jobs:
             -H "Authorization: Bearer $RENDER_API_KEY" \
             -H "Accept: application/json" \
             "https://api.render.com/v1/services?name=${{ steps.target.outputs.service_name }}&limit=1")
-          SVC_ID=$(echo "$RESP" | jq -r '.[0].service.id // empty')
+          # Render may return the list as an array OR wrap it in { services: [...] }
+          # OR return an error object on auth failure. Handle all defensively.
+          SVC_ID=$(echo "$RESP" | jq -r '
+            if type == "array" then (.[0].service.id? // .[0].id? // empty)
+            elif type == "object" and has("services") then (.services[0].id? // empty)
+            else empty
+            end
+          ' 2>/dev/null || true)
           if [ -z "$SVC_ID" ]; then
-            echo "::warning::Service '${{ steps.target.outputs.service_name }}' not found in Render yet. Provision the Blueprint (see docs/DEPLOY.md) and push again."
+            RESP_TYPE=$(echo "$RESP" | jq -r 'type' 2>/dev/null || echo "unparseable")
+            echo "::warning::Service '${{ steps.target.outputs.service_name }}' not found or API returned unexpected format. Response type: $RESP_TYPE. If the Blueprint is applied, verify RENDER_API_KEY has the correct scope."
+            # Print a snippet of the response for debugging (masking any secret-like values)
+            echo "$RESP" | head -c 300 | sed 's/[a-zA-Z0-9]\{20,\}/***REDACTED***/g'
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
